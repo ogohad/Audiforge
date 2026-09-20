@@ -24,13 +24,15 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Java 21 JDK
+# Install Java 25 JDK. Audiveris master (gradle.properties theMinJavaVersion)
+# moved to 25; the old image was built when 21 was enough, and a rebuild
+# with 21 fails at :app:compileJava ("invalid source release: 25").
 RUN mkdir -p /etc/apt/keyrings && \
     wget -O /etc/apt/keyrings/adoptium.asc https://packages.adoptium.net/artifactory/api/gpg/key/public && \
     echo "deb [signed-by=/etc/apt/keyrings/adoptium.asc] https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main" | \
     tee /etc/apt/sources.list.d/adoptium.list && \
     apt-get update && \
-    apt-get install -y temurin-21-jdk
+    apt-get install -y temurin-25-jdk
 
 # Install Gradle 8.7
 RUN wget https://services.gradle.org/distributions/gradle-8.7-bin.zip -O /tmp/gradle.zip \
@@ -46,7 +48,12 @@ ENV GRADLE_OPTS="-Dorg.gradle.daemon=false"
 
 # Build Audiveris
 WORKDIR /app
-RUN git clone https://github.com/Nirmata-1/audiveris.git
+# Pinned: an unpinned clone means every rebuild picks up whatever Audiveris
+# master is that day (this is how the Java requirement silently moved).
+# Bump AUDIVERIS_REF deliberately, with a build check.
+ARG AUDIVERIS_REF=bdf8a439
+RUN git clone https://github.com/Nirmata-1/audiveris.git && \
+    cd audiveris && git checkout --quiet "${AUDIVERIS_REF}"
 WORKDIR /app/audiveris
 RUN ./gradlew --no-daemon build
 
