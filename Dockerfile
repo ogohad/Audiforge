@@ -9,7 +9,11 @@ RUN go build -o audiforge .
 # Stage 2: Build Audiveris and final image
 FROM debian:bookworm-slim
 
-# Install system dependencies
+# Install system dependencies. libgtk-3-0 is not for a window: the pinned
+# Audiveris (bdf8a439) calls gdk_* through JNA at class-init time to read
+# the HiDPI scale (WellKnowns.getGdkMaxScale), and without the .so every
+# batch run died with UnsatisfiedLinkError before reading a page
+# (staging, 2026-09-20).
 RUN apt-get update && \
     apt-get install -y \
     git \
@@ -21,6 +25,7 @@ RUN apt-get update && \
     fontconfig \
     fonts-dejavu \
     libfreetype6 \
+    libgtk-3-0 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
