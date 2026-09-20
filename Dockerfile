@@ -55,7 +55,10 @@ ARG AUDIVERIS_REF=bdf8a439
 RUN git clone https://github.com/Nirmata-1/audiveris.git && \
     cd audiveris && git checkout --quiet "${AUDIVERIS_REF}"
 WORKDIR /app/audiveris
-RUN ./gradlew --no-daemon build
+# No `gradlew build` here: it runs Audiveris's own test suite, and on a
+# headless builder one of those tests waits forever on libgtk (the 2026-09-20
+# CI run sat in GlyphFactoryTest for an hour). installDist below compiles
+# everything the launcher needs and runs no tests.
 
 # Install a runnable distribution. The ':app' sub-project applies the Gradle
 # 'application' plugin, so installDist writes a self-contained tree with a
