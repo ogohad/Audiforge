@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,20 @@ const (
 	DownloadDir = "/tmp/downloads"
 	CleanupInterval = 1 * time.Hour
 	FileTTL     = 1 * time.Hour
+
+	// LAL-546: OCR language switch.
+	// AUDIVERIS_OCR_LANGS empty  -> no OCR languages at all (exactly prod before LAL-546):
+	//                               TESSDATA_PREFIX is removed from the engine's environment.
+	// AUDIVERIS_OCR_LANGS "a+b"  -> TESSDATA_PREFIX is kept and the engine gets
+	//                               -constant org.audiveris.omr.text.Language.defaultSpecification=a+b
+	OcrLangsEnv         = "AUDIVERIS_OCR_LANGS"
+	TessdataPrefixEnv   = "TESSDATA_PREFIX"
+	OcrLanguageConstant = "org.audiveris.omr.text.Language.defaultSpecification"
 )
+
+// Tesseract codes joined by '+', e.g. eng+deu+fra or chi_sim. No commas or spaces: gradle
+// splits -PcmdLineArgs on ',' (app/build.gradle: args cmdLineArgs.split(',')).
+var ocrLangsPattern = regexp.MustCompile(`^[a-z]{3}(_[a-z]+)?(\+[a-z]{3}(_[a-z]+)?)*$`)
 
 type ProcessingStatus struct {
 	Status        string `json:"status"`
@@ -51,6 +65,7 @@ func main() {
 	http.HandleFunc("/download/", downloadHandler)
 	http.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("/app/templates"))))
 
+	logOcrConfig()
 	log.Println("Server started on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
@@ -192,12 +207,17 @@ func processFile(id, inputPath string) {
         return
     }
 
+	ocrLangs := ocrLanguages()
+
 	cmdArgs := []string{
 		"-batch",
 		"-export",
 		"-output", outputDir,
-		"--", inputPath,
 	}
+	if ocrLangs != "" {
+		cmdArgs = append(cmdArgs, "-constant", OcrLanguageConstant+"="+ocrLangs)
+	}
+	cmdArgs = append(cmdArgs, "--", inputPath)
 
 	cmd := exec.Command(
 		"gradle",
@@ -206,6 +226,8 @@ func processFile(id, inputPath string) {
 		fmt.Sprintf("-PcmdLineArgs=%s", escapeArgs(cmdArgs)),
 	)
 	cmd.Dir = "/app/audiveris"
+	cmd.Env = engineEnv(ocrLangs)
+	log.Printf("Job %s OCR languages: %q", id, ocrLangs)
 
     logPath := filepath.Join(outputDir, "conversion.log")
     outputFile, err := os.Create(logPath)
@@ -266,6 +288,57 @@ if movementCount > 0 {
 			Message:   errorMsg,
 			Timestamp: time.Now().Unix(),
 		})
+	}
+}
+
+// ocrLanguages returns the validated AUDIVERIS_OCR_LANGS value, or "" (OCR off).
+func ocrLanguages() string {
+	langs := strings.TrimSpace(os.Getenv(OcrLangsEnv))
+	if langs == "" {
+		return ""
+	}
+	if !ocrLangsPattern.MatchString(langs) {
+		log.Printf("WARNING: %s=%q is not a '+'-joined list of Tesseract codes; OCR stays OFF", OcrLangsEnv, langs)
+		return ""
+	}
+	return langs
+}
+
+// engineEnv is the environment of the Audiveris child process. With OCR off it drops
+// TESSDATA_PREFIX, so Audiveris falls back to its own (empty) config tessdata folder and
+// logs "No installed OCR languages", as prod did before LAL-546.
+func engineEnv(ocrLangs string) []string {
+	if ocrLangs != "" {
+		return os.Environ()
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, TessdataPrefixEnv+"=") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// logOcrConfig prints the OCR arm at startup, with the language files actually present.
+func logOcrConfig() {
+	langs := ocrLanguages()
+	if langs == "" {
+		log.Printf("OCR: OFF (%s empty); engine runs without %s, no OCR languages", OcrLangsEnv, TessdataPrefixEnv)
+		return
+	}
+	prefix := os.Getenv(TessdataPrefixEnv)
+	files, _ := filepath.Glob(filepath.Join(prefix, "*.traineddata"))
+	var installed []string
+	for _, f := range files {
+		installed = append(installed, strings.TrimSuffix(filepath.Base(f), ".traineddata"))
+	}
+	log.Printf("OCR: ON, %s=%s, %s=%s, installed: %s", OcrLangsEnv, langs, TessdataPrefixEnv, prefix, strings.Join(installed, ","))
+	for _, code := range strings.Split(langs, "+") {
+		if _, err := os.Stat(filepath.Join(prefix, code+".traineddata")); err != nil {
+			// Audiveris refuses the whole spec if one code is missing (TesseractOCR.supports).
+			log.Printf("WARNING: %s.traineddata not found in %s; Audiveris will skip OCR entirely", code, prefix)
+		}
 	}
 }
 
